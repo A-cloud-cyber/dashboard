@@ -8,6 +8,7 @@ import urllib3
 from datetime import datetime, timedelta
 import numpy as np
 import json
+import pytz
 from streamlit_cookies_manager import EncryptedCookieManager
 
 # Disable SSL warnings
@@ -170,11 +171,14 @@ def get_cases(url, auth_credentials, verify_ssl):
 
 # Data Processing
 def process_operational_data(alerts, cases):
-    """Process data for detailed operational tracking"""
+    """Process data for detailed operational tracking with timezone conversion"""
     operational_data = []
-
+    
+    # Définir le fuseau horaire local (Casablanca)
+    local_tz = pytz.timezone('Africa/Casablanca')
+    
     cases_dict = {case.get('_id'): case for case in cases}
-
+    
     for alert in alerts:
         alert_info = {
             'alert_id': alert.get('_id', ''),
@@ -186,28 +190,31 @@ def process_operational_data(alerts, cases):
             'source': alert.get('source', 'Unknown'),
             'case_id': alert.get('case', ''),
         }
-
-        # Alert creation date
+        
+        # Alert creation date - Convertir en timezone locale
         if alert.get('createdAt'):
-            alert_info['alert_created_at'] = pd.to_datetime(alert.get('createdAt'), unit='ms')
+            utc_time = pd.to_datetime(alert.get('createdAt'), unit='ms', utc=True)
+            alert_info['alert_created_at'] = utc_time.tz_convert(local_tz)
         else:
-            alert_info['alert_created_at'] = pd.to_datetime('2025-09-23 12:40:00')
-
+            alert_info['alert_created_at'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
+        
         # Custom timestamps
         custom_fields = alert.get('customFields', {})
-
+        
         received_time_data = custom_fields.get('alert-received-time', {})
         if received_time_data and 'date' in received_time_data:
-            alert_info['alert_received_time'] = pd.to_datetime(received_time_data['date'], unit='ms')
+            utc_time = pd.to_datetime(received_time_data['date'], unit='ms', utc=True)
+            alert_info['alert_received_time'] = utc_time.tz_convert(local_tz)
         else:
-            alert_info['alert_received_time'] = pd.to_datetime('2025-09-23 12:40:00')
-
+            alert_info['alert_received_time'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
+            
         processing_time_data = custom_fields.get('processing-start-time', {})
         if processing_time_data and 'date' in processing_time_data:
-            alert_info['processing_start_time'] = pd.to_datetime(processing_time_data['date'], unit='ms')
+            utc_time = pd.to_datetime(processing_time_data['date'], unit='ms', utc=True)
+            alert_info['processing_start_time'] = utc_time.tz_convert(local_tz)
         else:
-            alert_info['processing_start_time'] = pd.to_datetime('2025-09-23 12:40:00')
-
+            alert_info['processing_start_time'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
+        
         # Response time calculation
         if alert_info['alert_received_time'] and alert_info['processing_start_time']:
             alert_info['response_time_minutes'] = (
@@ -215,7 +222,7 @@ def process_operational_data(alerts, cases):
             ).total_seconds() / 60
         else:
             alert_info['response_time_minutes'] = None
-
+        
         # Associated case information
         case_id = alert_info['case_id']
         if case_id and case_id in cases_dict:
@@ -224,11 +231,27 @@ def process_operational_data(alerts, cases):
                 'case_title': case.get('title', ''),
                 'case_status': case.get('status', 'Open'),
                 'assigned_to': case.get('assignee', case.get('owner', 'Unassigned')),
-                'case_created_at': pd.to_datetime(case.get('createdAt'), unit='ms') if case.get('createdAt') else pd.to_datetime('2025-09-23 12:40:00'),
-                'case_updated_at': pd.to_datetime(case.get('updatedAt'), unit='ms') if case.get('updatedAt') else None,
-                'case_closed_at': pd.to_datetime(case.get('endDate'), unit='ms') if case.get('endDate') else None,
             })
-
+            
+            # Dates des cases avec timezone
+            if case.get('createdAt'):
+                utc_time = pd.to_datetime(case.get('createdAt'), unit='ms', utc=True)
+                alert_info['case_created_at'] = utc_time.tz_convert(local_tz)
+            else:
+                alert_info['case_created_at'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
+            
+            if case.get('updatedAt'):
+                utc_time = pd.to_datetime(case.get('updatedAt'), unit='ms', utc=True)
+                alert_info['case_updated_at'] = utc_time.tz_convert(local_tz)
+            else:
+                alert_info['case_updated_at'] = None
+            
+            if case.get('endDate'):
+                utc_time = pd.to_datetime(case.get('endDate'), unit='ms', utc=True)
+                alert_info['case_closed_at'] = utc_time.tz_convert(local_tz)
+            else:
+                alert_info['case_closed_at'] = None
+            
             # Resolution time
             if alert_info['case_closed_at'] and alert_info['case_created_at']:
                 alert_info['resolution_time_hours'] = (
@@ -246,7 +269,7 @@ def process_operational_data(alerts, cases):
                 'case_closed_at': None,
                 'resolution_time_hours': None,
             })
-
+        
         # Operational status
         if alert_info['case_status'] in ['Resolved', 'Closed']:
             alert_info['operational_status'] = 'Terminated'
@@ -256,9 +279,9 @@ def process_operational_data(alerts, cases):
             alert_info['operational_status'] = 'In Progress'
         else:
             alert_info['operational_status'] = 'Untreated'
-
+            
         operational_data.append(alert_info)
-
+    
     return pd.DataFrame(operational_data)
 
 # KPI and Visualizations
@@ -738,7 +761,7 @@ def main():
     st.markdown('<div class="section-header">Detailed Data</div>', unsafe_allow_html=True)
 
     if not df.empty:
-        # Colonnes à afficher (avec alert_received_time)
+        # Colonnes à afficher
         display_columns = [
             'alert_title', 'sourceRef', 'alert_created_at',
             'alert_received_time', 'response_time_minutes',
@@ -754,7 +777,7 @@ def main():
             "alert_created_at": st.column_config.DatetimeColumn(
                 "Created At",
                 format="DD/MM/YYYY HH:mm",
-                help="Timestamp when the alert was created in thehive"
+                help="Timestamp when the alert was created in TheHive"
             ),
             "alert_received_time": st.column_config.DatetimeColumn(
                 "Received At",
