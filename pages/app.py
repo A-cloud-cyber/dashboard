@@ -436,13 +436,23 @@ def create_modern_kpi_dashboard(df):
         sla_takeover_pct = None
 
     # Optional indicators
+    # Robust false_positive detection
     false_positive_pct = None
     if 'false_positive' in df.columns:
         vals = df['false_positive'].dropna()
         if len(vals) > 0:
-            # consider true/false or 1/0
-            fp_count = vals.map(lambda x: 1 if str(x).lower() in ['true', '1', 'yes'] else 0).sum()
-            false_positive_pct = fp_count / len(vals) * 100
+            def map_fp(x):
+                s = str(x).strip().lower()
+                if s in ['true', '1', 'yes', 'y', 'oui', 'vrai', 'fp', 'faux_positif', 'faux positif', 'false_positive', 'false-positive']:
+                    return 1
+                if s in ['false', '0', 'no', 'non', 'faux', 'not_fp']:
+                    return 0
+                # unknown -> treat as NaN
+                return np.nan
+            mapped = vals.map(map_fp)
+            valid = mapped.dropna()
+            if len(valid) > 0:
+                false_positive_pct = valid.sum() / len(valid) * 100
 
     origin_stats = {}
     if 'origin' in df.columns:
@@ -453,7 +463,7 @@ def create_modern_kpi_dashboard(df):
         detection_stats = df['detection_method'].value_counts().to_dict()
 
     # First row of KPIs (reordered per user request)
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
 
     # Total Alerts
     with col1:
@@ -484,63 +494,21 @@ def create_modern_kpi_dashboard(df):
         </div>
         """, unsafe_allow_html=True)
 
-    # Avg Temps de prise en charge
-    with col4:
-        takeover_text = f"{avg_takeover:.1f} min" if avg_takeover is not None else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-            <div class="metric-value">{takeover_text}</div>
-            <div class="metric-label">Avg Temps de prise en charge</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Second row - Existing/performance metrics
+    # Second row - Performance metrics (reordered)
     col5, col6, col7, col8 = st.columns(4)
 
+    # KPI 3 - MTTR
+
     with col5:
-        response_text = f"{avg_response:.1f} min" if avg_response is not None else "N/A"
+        takeover_text = f"{avg_takeover:.1f} min" if avg_takeover is not None else "N/A"
         st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);">
-            <div class="metric-value">{response_text}</div>
-            <div class="metric-label">Avg Response (created - received)</div>
+        <div class="metric-container" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
+            <div class="metric-value">{takeover_text}</div>
+            <div class="metric-label">KPI 1 - Temps de prise en charge</div>
         </div>
         """, unsafe_allow_html=True)
 
     with col6:
-        terminated_text = f"{terminated}" if terminated is not None else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
-            <div class="metric-value">{terminated_text}</div>
-            <div class="metric-label">Terminated</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col7:
-        fp_text = f"{false_positive_pct:.1f}%" if false_positive_pct is not None else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #f0abfc 0%, #f97316 100%);">
-            <div class="metric-value">{fp_text}</div>
-            <div class="metric-label">% Faux Positifs</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Removed Origin card per request (no output in col8 for this row)
-    with col8:
-        st.markdown("""
-        <div style="height:100%;"></div>
-        """, unsafe_allow_html=True)
-
-    # Second row - Performance metrics (include SLA compliance)
-    col5, col6, col7, col8 = st.columns(4)
-
-    # SLA compliance: percent of alerts with response_time_minutes <= 30 among those with a response_time
-    if 'response_time_minutes' in df.columns and df['response_time_minutes'].notna().any():
-        sla_compliance = len(df[(df['response_time_minutes'] <= 30) & df['response_time_minutes'].notna()]) / len(df[df['response_time_minutes'].notna()]) * 100
-    else:
-        sla_compliance = None
-
-    # Remove Average Response Time card per request and replace with MTTR KPI
-    with col5:
         mttr_text = f"{avg_mttr_calc:.1f} h" if avg_mttr_calc is not None else "N/A"
         mttr_sub = f"(median: {median_mttr:.1f} h, n={mttr_count})" if median_mttr is not None else ""
         st.markdown(f"""
@@ -551,21 +519,53 @@ def create_modern_kpi_dashboard(df):
         </div>
         """, unsafe_allow_html=True)
 
-    with col6:
-        resolution_text = f"{avg_resolution:.1f} h" if pd.notna(avg_resolution) else "N/A"
+    # Avg Response (created - received)
+    with col7:
+        response_text = f"{avg_response:.1f} min" if avg_response is not None else "N/A"
         st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
-            <div class="metric-value">{resolution_text}</div>
-            <div class="metric-label">Average Resolution Time</div>
+        <div class="metric-container" style="background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);">
+            <div class="metric-value">{response_text}</div>
+            <div class="metric-label">Avg Response (created - received)</div>
         </div>
         """, unsafe_allow_html=True)
 
-    with col7:
+    # Average Resolution Time
+
+    # Third row - SLA, FP and Alerts/day
+    col8, col9, col10, col11 = st.columns(4)
+
+    # SLA compliance: percent of alerts with response_time_minutes <= 30 among those with a response_time
+    if 'response_time_minutes' in df.columns and df['response_time_minutes'].notna().any():
+        sla_compliance = len(df[(df['response_time_minutes'] <= 30) & df['response_time_minutes'].notna()]) / len(df[df['response_time_minutes'].notna()]) * 100
+    else:
+        sla_compliance = None
+
+
+    # SLA Compliance (displayed earlier as part of second row) and third row metrics
+    with col8:
         sla_text = f"{sla_compliance:.1f}%" if sla_compliance is not None else "N/A"
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #f97316 0%, #fb7185 100%);">
             <div class="metric-value">{sla_text}</div>
+            <div class="metric-label">SLA Prise en charge (&le; 30min)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col9:
+        sla_text2 = f"{sla_compliance:.1f}%" if sla_compliance is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #f97316 0%, #fb7185 100%);">
+            <div class="metric-value">{sla_text2}</div>
             <div class="metric-label">SLA Compliance (&le; 30 min)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col10:
+        fp_text = f"{false_positive_pct:.1f}%" if false_positive_pct is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #f0abfc 0%, #f97316 100%);">
+            <div class="metric-value">{fp_text}</div>
+            <div class="metric-label">% Faux Positifs</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -581,7 +581,7 @@ def create_modern_kpi_dashboard(df):
     except Exception:
         alerts_per_day = None
 
-    with col8:
+    with col11:
         apd_text = f"{alerts_per_day:.1f}" if alerts_per_day is not None else "N/A"
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
