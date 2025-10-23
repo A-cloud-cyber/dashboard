@@ -1060,43 +1060,81 @@ def main():
     if not df.empty:
         # Colonnes à afficher (avec alert_received_time et case_created_at)
         display_columns = [
-            'alert_title', 'sourceRef', 'alert_generated_time',  # Added here
-            'alert_created_at', 'alert_received_time', 
-            'case_created_at', 'processing_start_time',
-            'mttd_minutes', 'response_time_minutes',  # Added MTTD here
-            'resolution_time_hours', 'assigned_to',
-            'case_closed_at', 'operational_status'
+            'alert_title',
+            'sourceRef',
+            'alert_generated_time',
+            'alert_received_time',
+            'processing_start_time',
+            'alert_created_at',
+            'case_created_at', 
+            'case_closed_at',
+            'mttd_minutes',
+            'response_time_minutes',
+            'resolution_time_hours',
+            'assigned_to',
+            'operational_status'
         ]
 
         available_columns = [col for col in display_columns if col in df.columns]
 
+        # Configuration des colonnes avec descriptions
         column_config = {
-            "alert_title": "Alert Title",
-            "sourceRef": "Source Ref",
-            "alert_created_at": "Created At (local)",
-            "alert_received_time": "Received At (local)",
-            "case_created_at": "Case Created At (local)",
+            "alert_title": st.column_config.TextColumn(
+                "Alert Title",
+                help="Titre de l'alerte"
+            ),
+            "sourceRef": st.column_config.TextColumn(
+                "Source Ref",
+                help="Référence source de l'alerte"
+            ),
+            "alert_generated_time": st.column_config.TextColumn(
+                "Incident Time",
+                help="Le temps réel où l'incident s'est produit"
+            ),
+            "alert_received_time": st.column_config.TextColumn(
+                "Detection Time",
+                help="Le temps où l'incident est détecté par ELK"
+            ),
+            "processing_start_time": st.column_config.TextColumn(
+                "Processing Start",
+                help="Le temps de début de traitement de l'incident"
+            ),
+            "alert_created_at": st.column_config.TextColumn(
+                "Alert Created",
+                help="Le temps de création de l'alerte dans TheHive et notification de l'équipe"
+            ),
+            "case_created_at": st.column_config.TextColumn(
+                "Case Created",
+                help="La date d'ouverture du case"
+            ),
+            "case_closed_at": st.column_config.TextColumn(
+                "Case Closed",
+                help="La date de clôture du case"
+            ),
+            "mttd_minutes": st.column_config.NumberColumn(
+                "MTTD (min)",
+                help="Mean Time To Detect: Temps entre la génération et la détection de l'incident",
+                format="%.1f"
+            ),
             "response_time_minutes": st.column_config.NumberColumn(
                 "Response Time (min)",
-                format="%.1f",
-                help="Time between alert reception and processing start"
+                help="Temps entre la réception et le début du traitement",
+                format="%.1f"
             ),
             "resolution_time_hours": st.column_config.NumberColumn(
                 "Resolution Time (h)",
-                format="%.1f",
-                help="Total time from case creation to closure"
+                help="Temps total entre la création et la clôture du case",
+                format="%.1f"
             ),
-            "assigned_to": "Assigned To",
-            "case_closed_at": "Terminated At (local)",
+            "assigned_to": st.column_config.TextColumn(
+                "Assigned To",
+                help="L'analyste assigné au case"
+            ),
             "operational_status": st.column_config.SelectboxColumn(
-                "Operational Status",
-                options=['Untreated', 'In Progress', 'Terminated']
-            ),
-            # Streamlit may not expose a DateTimeColumn on all versions -> use TextColumn
-            "processing_start_time": st.column_config.TextColumn(
-                "Processing Start Time (local)",
-                help="Time when processing of the alert started (formatted)"
-            ),
+                "Status",
+                options=['Untreated', 'In Progress', 'Terminated'],
+                help="État opérationnel actuel de l'alerte"
+            )
         }
         def style_status(val):
             if pd.isna(val) or val == 'N/A':
