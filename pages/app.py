@@ -340,7 +340,7 @@ def create_modern_kpi_dashboard(df):
         st.warning("No data available for KPIs")
         return
 
-    st.markdown('<div class="section-header">KPI 1 — Temps de prise en charge · KPI 3 — Temps de réponse (MTTR) · KPI 5 — Tendances & corrélations temporelles</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Key Performance Indicators Dashboard</div>', unsafe_allow_html=True)
 
     # Calculate metrics
     total_alerts = len(df)
@@ -912,8 +912,9 @@ def main():
         if st.session_state.filter_option == "Daily":
             df = df[df['alert_created_at'].dt.date == st.session_state.selected_date]
         elif st.session_state.filter_option == "Weekly":
-            start_of_week = st.session_state.selected_date - pd.Timedelta(days=st.session_state.selected_date.weekday())
-            end_of_week = start_of_week + pd.Timedelta(days=6)
+            start_of_week = pd.Timestamp(st.session_state.selected_date - pd.Timedelta(days=st.session_state.selected_date.weekday()))
+            end_of_week = pd.Timestamp(start_of_week + pd.Timedelta(days=6))
+            end_of_week = end_of_week + pd.Timedelta(hours=23, minutes=59, seconds=59)
             df = df[(df['alert_created_at'] >= start_of_week) & (df['alert_created_at'] <= end_of_week)]
         elif st.session_state.filter_option == "Monthly":
             df = df[df['alert_created_at'].dt.month == st.session_state.selected_date.month]
