@@ -3,3 +3,4 @@ pandas
 plotly
 requests
 urllib3
+tzlocal

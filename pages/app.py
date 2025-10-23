@@ -8,8 +8,18 @@ import urllib3
 from datetime import datetime, timedelta
 import numpy as np
 import json
-import pytz
+try:
+    import tzlocal
+    _GET_LOCAL_TZ = tzlocal.get_localzone
+except Exception:
+    # Fallback: use system local timezone info via datetime
+    from datetime import datetime as _dt_datetime
+    _GET_LOCAL_TZ = lambda: _dt_datetime.now().astimezone().tzinfo
 from streamlit_cookies_manager import EncryptedCookieManager
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -171,14 +181,11 @@ def get_cases(url, auth_credentials, verify_ssl):
 
 # Data Processing
 def process_operational_data(alerts, cases):
-    """Process data for detailed operational tracking with timezone conversion"""
+    """Process data for detailed operational tracking"""
     operational_data = []
-    
-    # Définir le fuseau horaire local (Casablanca)
-    local_tz = pytz.timezone('Africa/Casablanca')
-    
+
     cases_dict = {case.get('_id'): case for case in cases}
-    
+
     for alert in alerts:
         alert_info = {
             'alert_id': alert.get('_id', ''),
@@ -190,99 +197,141 @@ def process_operational_data(alerts, cases):
             'source': alert.get('source', 'Unknown'),
             'case_id': alert.get('case', ''),
         }
-        
-        # Alert creation date - Convertir en timezone locale
+
+        # Alert creation date (convert from UTC to local time directly)
         if alert.get('createdAt'):
-            utc_time = pd.to_datetime(alert.get('createdAt'), unit='ms', utc=True)
-            alert_info['alert_created_at'] = utc_time.tz_convert(local_tz)
+            ts = pd.to_datetime(alert.get('createdAt'), unit='ms')
+            alert_info['alert_created_at'] = ts + pd.Timedelta(hours=1)  # Add 1 hour to match TheHive UI
         else:
-            alert_info['alert_created_at'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
-        
+            alert_info['alert_created_at'] = pd.NaT
+
         # Custom timestamps
-        custom_fields = alert.get('customFields', {})
-        
+        custom_fields = alert.get('customFields', {}) or {}
+
         received_time_data = custom_fields.get('alert-received-time', {})
         if received_time_data and 'date' in received_time_data:
-            utc_time = pd.to_datetime(received_time_data['date'], unit='ms', utc=True)
-            alert_info['alert_received_time'] = utc_time.tz_convert(local_tz)
+            ts = pd.to_datetime(received_time_data['date'], unit='ms')
+            alert_info['alert_received_time'] = ts + pd.Timedelta(hours=1)  # Add 1 hour to match TheHive UI
         else:
-            alert_info['alert_received_time'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
-            
+            alert_info['alert_received_time'] = pd.NaT
+
         processing_time_data = custom_fields.get('processing-start-time', {})
         if processing_time_data and 'date' in processing_time_data:
-            utc_time = pd.to_datetime(processing_time_data['date'], unit='ms', utc=True)
-            alert_info['processing_start_time'] = utc_time.tz_convert(local_tz)
+            ts = pd.to_datetime(processing_time_data['date'], unit='ms')
+            alert_info['processing_start_time'] = ts + pd.Timedelta(hours=1)  # Adjust as needed
         else:
-            alert_info['processing_start_time'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
-        
-        # Response time calculation
-        if alert_info['alert_received_time'] and alert_info['processing_start_time']:
-            alert_info['response_time_minutes'] = (
-                alert_info['processing_start_time'] - alert_info['alert_received_time']
-            ).total_seconds() / 60
+            alert_info['processing_start_time'] = pd.NaT  # Default to NaT if not found
+
+        # Response time calculation (existing): created_at - received_at
+        if pd.notna(alert_info['alert_received_time']) and pd.notna(alert_info['alert_created_at']):
+            try:
+                alert_info['response_time_minutes'] = (
+                    alert_info['alert_created_at'] - alert_info['alert_received_time']
+                ).total_seconds() / 60
+            except Exception:
+                alert_info['response_time_minutes'] = None
         else:
             alert_info['response_time_minutes'] = None
-        
+
+        # Takeover time (KPI 1): processing_start_time - alert_received_time (minutes)
+        if pd.notna(alert_info['alert_received_time']) and pd.notna(alert_info['processing_start_time']):
+            try:
+                alert_info['takeover_time_minutes'] = (
+                    alert_info['processing_start_time'] - alert_info['alert_received_time']
+                ).total_seconds() / 60
+            except Exception:
+                alert_info['takeover_time_minutes'] = None
+        else:
+            alert_info['takeover_time_minutes'] = None
+
         # Associated case information
         case_id = alert_info['case_id']
         if case_id and case_id in cases_dict:
             case = cases_dict[case_id]
+            # Convert case timestamps - ensure all timestamps are tz-naive for consistent calculations
+            if case.get('createdAt'):
+                ts = pd.to_datetime(case.get('createdAt'), unit='ms')
+                case_created_at = ts + pd.Timedelta(hours=1)
+            else:
+                case_created_at = pd.NaT
+
+            if case.get('updatedAt'):
+                ts = pd.to_datetime(case.get('updatedAt'), unit='ms')
+                case_updated_at = ts + pd.Timedelta(hours=1)
+            else:
+                case_updated_at = pd.NaT
+
+            if case.get('endDate'):
+                ts = pd.to_datetime(case.get('endDate'), unit='ms')
+                case_closed_at = ts + pd.Timedelta(hours=1)
+            else:
+                case_closed_at = pd.NaT
+
             alert_info.update({
                 'case_title': case.get('title', ''),
                 'case_status': case.get('status', 'Open'),
                 'assigned_to': case.get('assignee', case.get('owner', 'Unassigned')),
+                'case_created_at': case_created_at,
+                'case_updated_at': case_updated_at,
+                'case_closed_at': case_closed_at,
             })
-            
-            # Dates des cases avec timezone
-            if case.get('createdAt'):
-                utc_time = pd.to_datetime(case.get('createdAt'), unit='ms', utc=True)
-                alert_info['case_created_at'] = utc_time.tz_convert(local_tz)
-            else:
-                alert_info['case_created_at'] = pd.to_datetime('2025-09-23 12:40:00').tz_localize(local_tz)
-            
-            if case.get('updatedAt'):
-                utc_time = pd.to_datetime(case.get('updatedAt'), unit='ms', utc=True)
-                alert_info['case_updated_at'] = utc_time.tz_convert(local_tz)
-            else:
-                alert_info['case_updated_at'] = None
-            
-            if case.get('endDate'):
-                utc_time = pd.to_datetime(case.get('endDate'), unit='ms', utc=True)
-                alert_info['case_closed_at'] = utc_time.tz_convert(local_tz)
-            else:
-                alert_info['case_closed_at'] = None
-            
-            # Resolution time
-            if alert_info['case_closed_at'] and alert_info['case_created_at']:
-                alert_info['resolution_time_hours'] = (
-                    alert_info['case_closed_at'] - alert_info['case_created_at']
-                ).total_seconds() / 3600
+
+            # Resolution time (existing)
+            if pd.notna(alert_info['case_closed_at']) and pd.notna(alert_info['case_created_at']):
+                try:
+                    alert_info['resolution_time_hours'] = (
+                        alert_info['case_closed_at'] - alert_info['case_created_at']
+                    ).total_seconds() / 3600
+                except Exception:
+                    alert_info['resolution_time_hours'] = None
             else:
                 alert_info['resolution_time_hours'] = None
+
+            # MTTR (KPI 3): time between received_at and terminated_at (hours)
+            if pd.notna(alert_info['alert_received_time']) and pd.notna(alert_info['case_closed_at']):
+                try:
+                    alert_info['mttr_hours'] = (
+                        alert_info['case_closed_at'] - alert_info['alert_received_time']
+                    ).total_seconds() / 3600
+                    alert_info['mttr_minutes'] = alert_info['mttr_hours'] * 60 if alert_info['mttr_hours'] is not None else None
+                except Exception:
+                    alert_info['mttr_hours'] = None
+                    alert_info['mttr_minutes'] = None
+            else:
+                alert_info['mttr_hours'] = None
+                alert_info['mttr_minutes'] = None
         else:
             alert_info.update({
                 'case_title': 'No case created',
                 'case_status': 'N/A',
                 'assigned_to': 'Unassigned',
-                'case_created_at': None,
-                'case_updated_at': None,
-                'case_closed_at': None,
+                'case_created_at': pd.NaT,
+                'case_updated_at': pd.NaT,
+                'case_closed_at': pd.NaT,
                 'resolution_time_hours': None,
+                'mttr_hours': None,
+                'mttr_minutes': None,
             })
-        
+
         # Operational status
-        if alert_info['case_status'] in ['Resolved', 'Closed']:
+        if alert_info.get('case_status') in ['Resolved', 'Closed']:
             alert_info['operational_status'] = 'Terminated'
-        elif alert_info['case_id'] and alert_info['case_status'] in ['InProgress', 'Open']:
+        elif alert_info.get('case_id') and alert_info.get('case_status') in ['InProgress', 'Open']:
             alert_info['operational_status'] = 'In Progress'
-        elif alert_info['case_id']:
+        elif alert_info.get('case_id'):
             alert_info['operational_status'] = 'In Progress'
         else:
             alert_info['operational_status'] = 'Untreated'
-            
+
+        # Optional: detect false_positive / origin / detection_method from custom fields if present
+        alert_info['false_positive'] = custom_fields.get('false_positive', None)
+        alert_info['origin'] = custom_fields.get('origin', None)  # e.g. internal / external
+        alert_info['detection_method'] = custom_fields.get('detection_method', None)  # e.g. automatic / manual
+
         operational_data.append(alert_info)
-    
+
     return pd.DataFrame(operational_data)
+
 
 # KPI and Visualizations
 def create_modern_kpi_dashboard(df):
@@ -291,15 +340,52 @@ def create_modern_kpi_dashboard(df):
         st.warning("No data available for KPIs")
         return
 
-    st.markdown('<div class="section-header">Key Performance Indicators Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">KPI 1 — Temps de prise en charge · KPI 3 — Temps de réponse (MTTR) · KPI 5 — Tendances & corrélations temporelles</div>', unsafe_allow_html=True)
 
     # Calculate metrics
     total_alerts = len(df)
     untreated = len(df[df['operational_status'] == 'Untreated'])
     in_progress = len(df[df['operational_status'] == 'In Progress'])
     terminated = len(df[df['operational_status'] == 'Terminated'])
-    avg_response = df['response_time_minutes'].mean()
-    avg_resolution = df['resolution_time_hours'].mean()
+
+    # Avg takeover (KPI 1)
+    if 'takeover_time_minutes' in df.columns and df['takeover_time_minutes'].notna().any():
+        avg_takeover = df['takeover_time_minutes'].dropna().mean()
+    else:
+        avg_takeover = None
+
+    # Avg MTTR (KPI 3)
+    if 'mttr_hours' in df.columns and df['mttr_hours'].notna().any():
+        avg_mttr_hours = df['mttr_hours'].dropna().mean()
+    else:
+        avg_mttr_hours = None
+
+    # Keep existing avg response/resolution values if present
+    avg_response = df['response_time_minutes'].mean() if 'response_time_minutes' in df.columns else None
+    avg_resolution = df['resolution_time_hours'].mean() if 'resolution_time_hours' in df.columns else None
+
+    # SLA compliance (example: takeover <= 30 minutes)
+    if 'takeover_time_minutes' in df.columns and df['takeover_time_minutes'].notna().any():
+        sla_takeover_pct = (df[df['takeover_time_minutes'] <= 30]['takeover_time_minutes'].count() / df['takeover_time_minutes'].dropna().count()) * 100
+    else:
+        sla_takeover_pct = None
+
+    # Optional indicators
+    false_positive_pct = None
+    if 'false_positive' in df.columns:
+        vals = df['false_positive'].dropna()
+        if len(vals) > 0:
+            # consider true/false or 1/0
+            fp_count = vals.map(lambda x: 1 if str(x).lower() in ['true', '1', 'yes'] else 0).sum()
+            false_positive_pct = fp_count / len(vals) * 100
+
+    origin_stats = {}
+    if 'origin' in df.columns:
+        origin_stats = df['origin'].value_counts().to_dict()
+
+    detection_stats = {}
+    if 'detection_method' in df.columns:
+        detection_stats = df['detection_method'].value_counts().to_dict()
 
     # First row of KPIs
     col1, col2, col3, col4 = st.columns(4)
@@ -313,34 +399,79 @@ def create_modern_kpi_dashboard(df):
         """, unsafe_allow_html=True)
 
     with col2:
-        pct_untreated = (untreated/total_alerts*100) if total_alerts > 0 else 0
+        takeover_text = f"{avg_takeover:.1f} min" if avg_takeover is not None else "N/A"
         st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-            <div class="metric-value">{untreated}</div>
-            <div class="metric-label">Untreated ({pct_untreated:.1f}%)</div>
+        <div class="metric-container" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+            <div class="metric-value">{takeover_text}</div>
+            <div class="metric-label">Avg Temps de prise en charge</div>
         </div>
         """, unsafe_allow_html=True)
 
     with col3:
-        pct_in_progress = (in_progress/total_alerts*100) if total_alerts > 0 else 0
+        mttr_text = f"{avg_mttr_hours:.1f} h" if avg_mttr_hours is not None else "N/A"
         st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);">
-            <div class="metric-value">{in_progress}</div>
-            <div class="metric-label">In Progress ({pct_in_progress:.1f}%)</div>
+        <div class="metric-container" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
+            <div class="metric-value">{mttr_text}</div>
+            <div class="metric-label">Avg MTTR (Temps de résolution)</div>
         </div>
         """, unsafe_allow_html=True)
 
     with col4:
-        pct_terminated = (terminated/total_alerts*100) if total_alerts > 0 else 0
+        sla_text = f"{sla_takeover_pct:.1f}%" if sla_takeover_pct is not None else "N/A"
         st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);">
-            <div class="metric-value">{terminated}</div>
-            <div class="metric-label">Terminated ({pct_terminated:.1f}%)</div>
+        <div class="metric-container" style="background: linear-gradient(135deg, #f97316 0%, #fb7185 100%);">
+            <div class="metric-value">{sla_text}</div>
+            <div class="metric-label">SLA Prise en charge (&le; 30min)</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Second row - Performance metrics
-    col5, col6 = st.columns(2)
+    # Second row - Existing/performance metrics
+    col5, col6, col7, col8 = st.columns(4)
+
+    with col5:
+        response_text = f"{avg_response:.1f} min" if avg_response is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);">
+            <div class="metric-value">{response_text}</div>
+            <div class="metric-label">Avg Response (created - received)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col6:
+        resolution_text = f"{avg_resolution:.1f} h" if avg_resolution is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
+            <div class="metric-value">{resolution_text}</div>
+            <div class="metric-label">Avg Resolution Time</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col7:
+        fp_text = f"{false_positive_pct:.1f}%" if false_positive_pct is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #f0abfc 0%, #f97316 100%);">
+            <div class="metric-value">{fp_text}</div>
+            <div class="metric-label">% Faux Positifs</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col8:
+        origin_text = ", ".join([f"{k}:{v}" for k, v in origin_stats.items()]) if origin_stats else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #fde68a 0%, #fca5a5 100%);">
+            <div class="metric-value" style="font-size:1rem;">{origin_text}</div>
+            <div class="metric-label">Origine (internal/external)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Second row - Performance metrics (include SLA compliance)
+    col5, col6, col7, col8 = st.columns(4)
+
+    # SLA compliance: percent of alerts with response_time_minutes <= 30 among those with a response_time
+    if 'response_time_minutes' in df.columns and df['response_time_minutes'].notna().any():
+        sla_compliance = len(df[(df['response_time_minutes'] <= 30) & df['response_time_minutes'].notna()]) / len(df[df['response_time_minutes'].notna()]) * 100
+    else:
+        sla_compliance = None
 
     with col5:
         response_text = f"{avg_response:.1f} min" if pd.notna(avg_response) else "N/A"
@@ -357,6 +488,36 @@ def create_modern_kpi_dashboard(df):
         <div class="metric-container" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
             <div class="metric-value">{resolution_text}</div>
             <div class="metric-label">Average Resolution Time</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col7:
+        sla_text = f"{sla_compliance:.1f}%" if sla_compliance is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #f97316 0%, #fb7185 100%);">
+            <div class="metric-value">{sla_text}</div>
+            <div class="metric-label">SLA Compliance (&le; 30 min)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Alerts per day: compute from alert_created_at range
+    try:
+        if 'alert_created_at' in df.columns and df['alert_created_at'].notna().any():
+            min_date = pd.to_datetime(df['alert_created_at']).min()
+            max_date = pd.to_datetime(df['alert_created_at']).max()
+            days = (max_date - min_date).days + 1
+            alerts_per_day = len(df) / days if days > 0 else len(df)
+        else:
+            alerts_per_day = None
+    except Exception:
+        alerts_per_day = None
+
+    with col8:
+        apd_text = f"{alerts_per_day:.1f}" if alerts_per_day is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
+            <div class="metric-value">{apd_text}</div>
+            <div class="metric-label">Avg Alerts / Day</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -390,61 +551,13 @@ def create_advanced_status_chart(df):
             'font': {'size': 20, 'color': '#1f2937'}
         },
         font=dict(size=12),
-        height=400,
+        height=300,
         margin=dict(t=80, b=20, l=20, r=20)
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-def create_response_time_dashboard(df):
-    """Response time dashboard"""
-    response_data = df[df['response_time_minutes'].notna()].copy()
-
-    if response_data.empty:
-        st.info("No response time data available")
-        return
-
-    # Histogram with density curve
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    # Histogram
-    fig.add_trace(
-        go.Histogram(
-            x=response_data['response_time_minutes'],
-            nbinsx=25,
-            name="Distribution",
-            marker_color='rgba(59, 130, 246, 0.7)',
-            yaxis='y'
-        ),
-        secondary_y=False,
-    )
-
-    # Statistics
-    avg_response = response_data['response_time_minutes'].mean()
-    median_response = response_data['response_time_minutes'].median()
-
-    # Reference lines
-    fig.add_vline(x=avg_response, line_dash="dash", line_color="#ef4444", line_width=2,
-                  annotation_text=f"Average: {avg_response:.1f} min")
-    fig.add_vline(x=median_response, line_dash="dot", line_color="#10b981", line_width=2,
-                  annotation_text=f"Median: {median_response:.1f} min")
-    fig.add_vline(x=30, line_dash="solid", line_color="#f59e0b", line_width=2,
-                  annotation_text="SLA: 30 min")
-
-    fig.update_layout(
-        title={
-            'text': "Response Time Analysis",
-            'x': 0.5,
-            'xanchor': 'center',
-            'font': {'size': 20, 'color': '#1f2937'}
-        },
-        xaxis_title="Response Time (minutes)",
-        yaxis_title="Number of Alerts",
-        height=450,
-        margin=dict(t=80, b=60, l=60, r=60)
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
+# Note: Response time analysis chart removed per request. Use assignment performance dashboard for analyst reactivity.
 
 def create_assignment_performance_dashboard(df):
     """Assignment performance dashboard"""
@@ -455,18 +568,30 @@ def create_assignment_performance_dashboard(df):
         return
 
     # Analysis by assignee
-    assignment_stats = assigned_data.groupby('assigned_to').agg({
-        'alert_id': 'count',
-        'operational_status': lambda x: (x == 'Terminated').sum(),
-        'resolution_time_hours': 'mean',
-        'response_time_minutes': 'mean'
-    }).reset_index()
+    # Per-assignee stats: count, terminated count, avg resolution, avg response, SLA compliance
+    def sla_comp(series):
+        valid = series.dropna()
+        if len(valid) == 0:
+            return np.nan
+        return (valid <= 30).sum() / len(valid) * 100
 
-    assignment_stats.columns = ['Assignee', 'Total_Cases', 'Cases_Terminated', 'Avg_Resolution_Time', 'Avg_Response_Time']
+    # Build per-assignee statistics including SLA compliance
+    assignment_stats = assigned_data.groupby('assigned_to').apply(
+        lambda g: pd.Series({
+            'Total_Cases': g['alert_id'].count(),
+            'Cases_Terminated': (g['operational_status'] == 'Terminated').sum(),
+            'Avg_Resolution_Time': g['resolution_time_hours'].mean(),
+            'Avg_Response_Time': g['response_time_minutes'].mean(),
+            'SLA_Compliance': sla_comp(g['response_time_minutes'])
+        })
+    ).reset_index()
+
+    assignment_stats.columns = ['Assignee', 'Total_Cases', 'Cases_Terminated', 'Avg_Resolution_Time', 'Avg_Response_Time', 'SLA_Compliance']
 
     # Ensure numeric types and fill NaN values
     assignment_stats['Avg_Resolution_Time'] = pd.to_numeric(assignment_stats['Avg_Resolution_Time'], errors='coerce').fillna(0)
     assignment_stats['Avg_Response_Time'] = pd.to_numeric(assignment_stats['Avg_Response_Time'], errors='coerce').fillna(0)
+    assignment_stats['SLA_Compliance'] = pd.to_numeric(assignment_stats['SLA_Compliance'], errors='coerce')
 
     assignment_stats['Completion_Rate'] = (assignment_stats['Cases_Terminated'] / assignment_stats['Total_Cases']) * 100
     assignment_stats['Cases_In_Progress'] = assignment_stats['Total_Cases'] - assignment_stats['Cases_Terminated']
@@ -514,7 +639,7 @@ def create_assignment_performance_dashboard(df):
     )
 
     fig.update_layout(
-        height=700,
+        height=500,
         title_text="Assignee Performance Dashboard",
         title_x=0.5,
         barmode='stack'
@@ -534,7 +659,8 @@ def create_assignment_performance_dashboard(df):
     display_stats = assignment_stats.copy()
     display_stats['Avg_Resolution_Time'] = display_stats['Avg_Resolution_Time'].round(1)
     display_stats['Avg_Response_Time'] = display_stats['Avg_Response_Time'].round(1)
-    display_stats['Completion_Rate'] = display_stats['Completion_Rate'].round(1)
+    display_stats['SLA_Compliance'] = display_stats['SLA_Compliance'].round(1).fillna(0)
+    display_stats['Completion_Rate'] = (display_stats['Cases_Terminated'] / display_stats['Total_Cases'] * 100).round(1)
 
     st.dataframe(
         display_stats,
@@ -555,6 +681,10 @@ def create_assignment_performance_dashboard(df):
             "Avg_Response_Time": st.column_config.NumberColumn(
                 "Avg Response Time (min)",
                 format="%.1f"
+            ),
+            "SLA_Compliance": st.column_config.NumberColumn(
+                "SLA Compliance (%)",
+                format="%.1f"
             )
         },
         use_container_width=True,
@@ -569,26 +699,33 @@ def create_timeline_dashboard(df):
         st.info("No temporal data available")
         return
 
-    # Analysis by day
-    timeline_data['date'] = timeline_data['alert_created_at'].dt.date
-    timeline_data['hour'] = timeline_data['alert_created_at'].dt.hour
+    # Ensure datetime
+    timeline_data['date'] = pd.to_datetime(timeline_data['alert_created_at']).dt.date
+    timeline_data['hour'] = pd.to_datetime(timeline_data['alert_created_at']).dt.hour
 
+    # Daily stats
     daily_stats = timeline_data.groupby('date').agg({
         'alert_id': 'count',
         'response_time_minutes': 'mean',
         'operational_status': lambda x: (x == 'Terminated').sum(),
         'resolution_time_hours': 'mean'
     }).reset_index()
-
     daily_stats.columns = ['Date', 'Nb_Alerts', 'Avg_Response', 'Nb_Terminated', 'Avg_Resolution']
 
-    # Combined temporal chart
+    # Top categories and sources (KPI 5)
+    top_types = timeline_data['type'].value_counts().nlargest(10).reset_index()
+    top_types.columns = ['Type', 'Count']
+    top_sources = timeline_data['source'].value_counts().nlargest(10).reset_index()
+    top_sources.columns = ['Source', 'Count']
+
+    # Combined temporal + category display
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=3, cols=2,
         subplot_titles=('Alert Volume by Day', 'Average Response Time',
-                       'Hourly Distribution', 'Resolution Trend'),
+                       'Hourly Distribution', 'Resolution Trend', 'Top Categories', 'Top Sources'),
         specs=[[{"secondary_y": False}, {"secondary_y": False}],
-               [{"secondary_y": False}, {"secondary_y": False}]]
+               [{"secondary_y": False}, {"secondary_y": False}],
+               [{"type": "bar"}, {"type": "bar"}]]
     )
 
     # Volume by day
@@ -609,7 +746,6 @@ def create_timeline_dashboard(df):
     # Hourly distribution
     hourly_dist = timeline_data.groupby('hour').size().reset_index()
     hourly_dist.columns = ['Hour', 'Count']
-
     fig.add_trace(
         go.Bar(x=hourly_dist['Hour'], y=hourly_dist['Count'],
                marker_color='#10b981', name='By Hour'),
@@ -624,14 +760,47 @@ def create_timeline_dashboard(df):
         row=2, col=2
     )
 
+    # Top categories
+    fig.add_trace(
+        go.Bar(x=top_types['Type'], y=top_types['Count'], marker_color='#f59e0b', name='Categories'),
+        row=3, col=1
+    )
+
+    # Top sources
+    fig.add_trace(
+        go.Bar(x=top_sources['Source'], y=top_sources['Count'], marker_color='#ef4444', name='Sources'),
+        row=3, col=2
+    )
+
     fig.update_layout(
-        height=700,
-        title_text="Complete Temporal Analysis",
+        height=900,
+        title_text="Complete Temporal & Category Analysis",
         title_x=0.5,
         showlegend=False
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # Additional tables / breakdowns for KPI 5 details
+    st.markdown('<div class="section-header">KPI 5 — Tendances & Corrélations</div>', unsafe_allow_html=True)
+    colA, colB = st.columns(2)
+
+    with colA:
+        st.subheader("Top Categories")
+        st.dataframe(top_types, use_container_width=True, hide_index=True)
+
+    with colB:
+        st.subheader("Top Sources")
+        st.dataframe(top_sources, use_container_width=True, hide_index=True)
+
+    # Optional: show detection / origin distributions
+    if 'detection_method' in timeline_data.columns:
+        st.subheader("Detection Method Distribution")
+        st.bar_chart(timeline_data['detection_method'].value_counts())
+
+    if 'origin' in timeline_data.columns:
+        st.subheader("Origin (internal vs external)")
+        st.bar_chart(timeline_data['origin'].value_counts())
 
 def main():
     # Initialize session state
@@ -671,10 +840,17 @@ def main():
             st.session_state.df = None
             st.rerun()
 
-        st.subheader("Filters")
-        days_filter = st.selectbox("Analysis Period", [7, 14, 30, 90], index=2, key="days_filter")
-        st.session_state.filters['days_filter'] = days_filter
+        st.subheader("Date Filters")
+        
+        # Daily filter
+        selected_date = st.date_input("Select a date", value=datetime.now().date())
+        st.session_state.selected_date = selected_date
 
+        # Weekly, Monthly, Quarterly filters
+        filter_option = st.selectbox("Select Filter Type", ["Daily", "Weekly", "Monthly", "Quarterly"])
+        st.session_state.filter_option = filter_option
+
+        st.subheader("Operational Status Filter")
         status_filter = st.multiselect(
             "Operational Status",
             ['Untreated', 'In Progress', 'Terminated'],
@@ -682,6 +858,16 @@ def main():
             key="status_filter"
         )
         st.session_state.filters['status_filter'] = status_filter
+
+        # Timezone selection for display (user can override detected timezone)
+        tz_options = ['System Local', 'Africa/Casablanca', 'Europe/Berlin', 'UTC']
+        default_tz = st.session_state.get('display_tz', 'System Local')
+        if default_tz not in tz_options:
+            default_tz = 'System Local'
+        selected_tz = st.selectbox("Display Timezone", tz_options, index=tz_options.index(default_tz), key='display_tz')
+
+        # Option: afficher les timestamps bruts (pas de conversion de fuseau)
+        show_raw = st.checkbox("Afficher timestamps bruts (pas de conversion de fuseau)", value=False, key='show_raw_timestamps')
 
         st.markdown("---")
         if st.button("🚪 Logout", type="secondary", use_container_width=True):
@@ -718,14 +904,26 @@ def main():
         df = st.session_state.df
         st.info(f"📊 Using cached data: **{len(df):,} alerts**")
 
-    # Filter data
+    # Filter data based on selected date and filter option
     if not df.empty:
-        cutoff_date = datetime.now() - timedelta(days=st.session_state.filters['days_filter'])
-        df = df[
-            (df['alert_created_at'].isna()) |
-            (df['alert_created_at'] >= cutoff_date)
-        ]
+        # Ensure consistent datetime types for comparison
+        df['alert_created_at'] = pd.to_datetime(df['alert_created_at'])
 
+        if st.session_state.filter_option == "Daily":
+            df = df[df['alert_created_at'].dt.date == st.session_state.selected_date]
+        elif st.session_state.filter_option == "Weekly":
+            start_of_week = st.session_state.selected_date - pd.Timedelta(days=st.session_state.selected_date.weekday())
+            end_of_week = start_of_week + pd.Timedelta(days=6)
+            df = df[(df['alert_created_at'] >= start_of_week) & (df['alert_created_at'] <= end_of_week)]
+        elif st.session_state.filter_option == "Monthly":
+            df = df[df['alert_created_at'].dt.month == st.session_state.selected_date.month]
+            df = df[df['alert_created_at'].dt.year == st.session_state.selected_date.year]
+        elif st.session_state.filter_option == "Quarterly":
+            quarter = (st.session_state.selected_date.month - 1) // 3 + 1
+            df = df[(df['alert_created_at'].dt.month - 1) // 3 + 1 == quarter]
+            df = df[df['alert_created_at'].dt.year == st.session_state.selected_date.year]
+
+        # Filter by operational status
         if st.session_state.filters['status_filter']:
             df = df[df['operational_status'].isin(st.session_state.filters['status_filter'])]
 
@@ -741,19 +939,11 @@ def main():
         create_advanced_status_chart(df)
 
     with col2:
-        create_response_time_dashboard(df)
+        create_assignment_performance_dashboard(df)
 
     st.divider()
 
-    # Assignee performance
-    st.markdown('<div class="section-header">Performance Analysis</div>', unsafe_allow_html=True)
-    create_assignment_performance_dashboard(df)
-
-    st.divider()
-
-    # Temporal analysis
-    st.markdown('<div class="section-header">Temporal Analysis</div>', unsafe_allow_html=True)
-    create_timeline_dashboard(df)
+    # Removed separate Performance Analysis and Temporal Analysis sections per request
 
     st.divider()
 
@@ -761,11 +951,11 @@ def main():
     st.markdown('<div class="section-header">Detailed Data</div>', unsafe_allow_html=True)
 
     if not df.empty:
-        # Colonnes à afficher
+        # Colonnes à afficher (avec alert_received_time et case_created_at)
         display_columns = [
             'alert_title', 'sourceRef', 'alert_created_at',
-            'alert_received_time', 'response_time_minutes',
-            'resolution_time_hours', 'assigned_to',
+            'alert_received_time', 'case_created_at', 'processing_start_time',  # Added here
+            'response_time_minutes', 'resolution_time_hours', 'assigned_to',
             'case_closed_at', 'operational_status'
         ]
 
@@ -774,16 +964,9 @@ def main():
         column_config = {
             "alert_title": "Alert Title",
             "sourceRef": "Source Ref",
-            "alert_created_at": st.column_config.DatetimeColumn(
-                "Created At",
-                format="DD/MM/YYYY HH:mm",
-                help="Timestamp when the alert was created in TheHive"
-            ),
-            "alert_received_time": st.column_config.DatetimeColumn(
-                "Received At",
-                format="DD/MM/YYYY HH:mm",
-                help="Timestamp when the alert was received by Elastic stack"
-            ),
+            "alert_created_at": "Created At (local)",
+            "alert_received_time": "Received At (local)",
+            "case_created_at": "Case Created At (local)",
             "response_time_minutes": st.column_config.NumberColumn(
                 "Response Time (min)",
                 format="%.1f",
@@ -795,16 +978,17 @@ def main():
                 help="Total time from case creation to closure"
             ),
             "assigned_to": "Assigned To",
-            "case_closed_at": st.column_config.DatetimeColumn(
-                "Terminated At",
-                format="DD/MM/YYYY HH:mm"
-            ),
+            "case_closed_at": "Terminated At (local)",
             "operational_status": st.column_config.SelectboxColumn(
                 "Operational Status",
                 options=['Untreated', 'In Progress', 'Terminated']
-            )
+            ),
+            # Streamlit may not expose a DateTimeColumn on all versions -> use TextColumn
+            "processing_start_time": st.column_config.TextColumn(
+                "Processing Start Time (local)",
+                help="Time when processing of the alert started (formatted)"
+            ),
         }
-
         def style_status(val):
             if pd.isna(val) or val == 'N/A':
                 return ''
@@ -817,7 +1001,21 @@ def main():
                 return 'background-color: #fee2e2; color: #991b1b; font-weight: bold'
             return ''
 
-        styled_df = df[available_columns].head(100).style.applymap(style_status, subset=['operational_status'])
+        # Handle timestamp display
+        display_df = df[available_columns].copy()
+        use_raw = st.session_state.get('show_raw_timestamps', False)
+
+        # Format timestamps as they appear in TheHive UI
+        for col in ['alert_created_at', 'alert_received_time', 'case_created_at', 'case_closed_at', 'processing_start_time']:
+            if col in display_df.columns:
+                try:
+                    # Keep the timestamp as is since we already adjusted it in process_operational_data
+                    display_df[col] = pd.to_datetime(display_df[col], errors='coerce').dt.strftime('%d/%m/%Y %H:%M')
+                except Exception:
+                    # Fallback: simple formatting if something fails
+                    display_df[col] = pd.to_datetime(display_df[col], errors='coerce').dt.strftime('%d/%m/%Y %H:%M')
+
+        styled_df = display_df.head(100).style.applymap(style_status, subset=['operational_status'])
         st.dataframe(
             styled_df,
             column_config=column_config,
@@ -910,11 +1108,20 @@ def main():
 
     info_col1, info_col2, info_col3 = st.columns(3)
 
+    # Display timezone for footer
+    sel_tz_name = st.session_state.get('display_tz', 'System Local')
+    if sel_tz_name == 'System Local':
+        footer_tz = _GET_LOCAL_TZ()
+    elif sel_tz_name == 'UTC':
+        footer_tz = 'UTC'
+    else:
+        footer_tz = sel_tz_name
+
     with info_col1:
         st.markdown(f"""
         <div style="text-align: center; padding: 1rem; background: #f8fafc; border-radius: 8px;">
             <h5 style="margin:0; color:#64748b;">Last Update</h5>
-            <p style="margin:0; color:#374151;">{datetime.now().strftime('%d/%m/%Y at %H:%M:%S')}</p>
+            <p style="margin:0; color:#374151;">{datetime.now().astimezone(footer_tz if not isinstance(footer_tz, str) else ZoneInfo(footer_tz)).strftime('%d/%m/%Y at %H:%M:%S %Z')}</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -931,6 +1138,7 @@ def main():
         <div style="text-align: center; padding: 1rem; background: #f8fafc; border-radius: 8px;">
             <h5 style="margin:0; color:#64748b;">Total Analyzed</h5>
             <p style="margin:0; color:#374151;">{len(df)} alerts</p>
+            <p style="margin:0; color:#374151; font-size:0.85rem;">Timezone: {footer_tz}</p>
         </div>
         """, unsafe_allow_html=True)
 
