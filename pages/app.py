@@ -1,3 +1,4 @@
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -276,6 +277,20 @@ def process_operational_data(alerts, cases):
                 'case_closed_at': case_closed_at,
             })
 
+            # If false_positive is not provided on the alert, check case custom fields or tags
+            case_custom = case.get('customFields', {}) or {}
+            # common variations
+            case_fp = case_custom.get('false_positive') if isinstance(case_custom, dict) else None
+            if not alert_info.get('false_positive') and case_fp is not None:
+                alert_info['false_positive'] = case_fp
+            # also check tags or labels which some instances use
+            tags = case.get('tags') or case.get('labels') or []
+            try:
+                if (not alert_info.get('false_positive')) and isinstance(tags, (list, tuple)) and any(str(t).lower() in ['false_positive', 'false-positive', 'fp', 'false positive', 'faux_positif', 'faux positif'] for t in tags):
+                    alert_info['false_positive'] = True
+            except Exception:
+                pass
+
             # Resolution time (existing)
             if pd.notna(alert_info['case_closed_at']) and pd.notna(alert_info['case_created_at']):
                 try:
@@ -360,6 +375,56 @@ def create_modern_kpi_dashboard(df):
     else:
         avg_mttr_hours = None
 
+    # Recompute MTTR explicitly from received -> terminated using the filtered df
+    avg_mttr_calc = None
+    median_mttr = None
+    mttr_count = 0
+    try:
+        if 'case_closed_at' in df.columns and 'alert_received_time' in df.columns:
+            mttr_series = (pd.to_datetime(df['case_closed_at']) - pd.to_datetime(df['alert_received_time'])).dt.total_seconds() / 3600
+            mttr_valid = mttr_series.dropna()
+            # If the current UI filter is Weekly, compute the weighted daily average:
+            try:
+                current_filter = st.session_state.get('filter_option', None)
+            except Exception:
+                current_filter = None
+
+            if current_filter == 'Weekly' and not mttr_valid.empty and 'alert_created_at' in df.columns:
+                # group by day (based on alert_created_at) to compute n_i and avg_i per day
+                temp = pd.DataFrame({'alert_created_at': pd.to_datetime(df['alert_created_at']), 'mttr': mttr_series})
+                temp = temp.dropna(subset=['mttr', 'alert_created_at'])
+                if not temp.empty:
+                    temp['date'] = temp['alert_created_at'].dt.date
+                    daily = temp.groupby('date')['mttr'].agg(['count', 'mean']).reset_index()
+                    # weighted average across days
+                    numerator = (daily['count'] * daily['mean']).sum()
+                    denominator = daily['count'].sum()
+                    if denominator > 0:
+                        avg_mttr_calc = numerator / denominator
+                        median_mttr = mttr_valid.median()
+                        mttr_count = int(denominator)
+                    else:
+                        avg_mttr_calc = None
+                        median_mttr = None
+                        mttr_count = 0
+                else:
+                    avg_mttr_calc = None
+                    median_mttr = None
+                    mttr_count = 0
+            else:
+                if len(mttr_valid) > 0:
+                    avg_mttr_calc = mttr_valid.mean()
+                    median_mttr = mttr_valid.median()
+                    mttr_count = int(len(mttr_valid))
+                else:
+                    avg_mttr_calc = None
+                    median_mttr = None
+                    mttr_count = 0
+    except Exception:
+        avg_mttr_calc = None
+        median_mttr = None
+        mttr_count = 0
+
     # Keep existing avg response/resolution values if present
     avg_response = df['response_time_minutes'].mean() if 'response_time_minutes' in df.columns else None
     avg_resolution = df['resolution_time_hours'].mean() if 'resolution_time_hours' in df.columns else None
@@ -387,9 +452,10 @@ def create_modern_kpi_dashboard(df):
     if 'detection_method' in df.columns:
         detection_stats = df['detection_method'].value_counts().to_dict()
 
-    # First row of KPIs
+    # First row of KPIs (reordered per user request)
     col1, col2, col3, col4 = st.columns(4)
 
+    # Total Alerts
     with col1:
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
@@ -398,30 +464,33 @@ def create_modern_kpi_dashboard(df):
         </div>
         """, unsafe_allow_html=True)
 
+    # Terminated
     with col2:
+        terminated_text = f"{terminated}" if terminated is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
+            <div class="metric-value">{terminated_text}</div>
+            <div class="metric-label">Terminated</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # In Progress
+    with col3:
+        in_progress_text = f"{in_progress}" if in_progress is not None else "N/A"
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
+            <div class="metric-value">{in_progress_text}</div>
+            <div class="metric-label">In Progress</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Avg Temps de prise en charge
+    with col4:
         takeover_text = f"{avg_takeover:.1f} min" if avg_takeover is not None else "N/A"
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
             <div class="metric-value">{takeover_text}</div>
             <div class="metric-label">Avg Temps de prise en charge</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        mttr_text = f"{avg_mttr_hours:.1f} h" if avg_mttr_hours is not None else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
-            <div class="metric-value">{mttr_text}</div>
-            <div class="metric-label">Avg MTTR (Temps de résolution)</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col4:
-        sla_text = f"{sla_takeover_pct:.1f}%" if sla_takeover_pct is not None else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #f97316 0%, #fb7185 100%);">
-            <div class="metric-value">{sla_text}</div>
-            <div class="metric-label">SLA Prise en charge (&le; 30min)</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -438,11 +507,11 @@ def create_modern_kpi_dashboard(df):
         """, unsafe_allow_html=True)
 
     with col6:
-        resolution_text = f"{avg_resolution:.1f} h" if avg_resolution is not None else "N/A"
+        terminated_text = f"{terminated}" if terminated is not None else "N/A"
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
-            <div class="metric-value">{resolution_text}</div>
-            <div class="metric-label">Avg Resolution Time</div>
+            <div class="metric-value">{terminated_text}</div>
+            <div class="metric-label">Terminated</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -455,13 +524,10 @@ def create_modern_kpi_dashboard(df):
         </div>
         """, unsafe_allow_html=True)
 
+    # Removed Origin card per request (no output in col8 for this row)
     with col8:
-        origin_text = ", ".join([f"{k}:{v}" for k, v in origin_stats.items()]) if origin_stats else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #fde68a 0%, #fca5a5 100%);">
-            <div class="metric-value" style="font-size:1rem;">{origin_text}</div>
-            <div class="metric-label">Origine (internal/external)</div>
-        </div>
+        st.markdown("""
+        <div style="height:100%;"></div>
         """, unsafe_allow_html=True)
 
     # Second row - Performance metrics (include SLA compliance)
@@ -473,12 +539,15 @@ def create_modern_kpi_dashboard(df):
     else:
         sla_compliance = None
 
+    # Remove Average Response Time card per request and replace with MTTR KPI
     with col5:
-        response_text = f"{avg_response:.1f} min" if pd.notna(avg_response) else "N/A"
+        mttr_text = f"{avg_mttr_calc:.1f} h" if avg_mttr_calc is not None else "N/A"
+        mttr_sub = f"(median: {median_mttr:.1f} h, n={mttr_count})" if median_mttr is not None else ""
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-            <div class="metric-value">{response_text}</div>
-            <div class="metric-label">Average Response Time</div>
+            <div class="metric-value">{mttr_text}</div>
+            <div class="metric-label">KPI 3 - Temps de réponse (MTTR)</div>
+            <div class="metric-label" style="font-size:0.8rem; opacity:0.85;">{mttr_sub}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -841,7 +910,7 @@ def main():
             st.rerun()
 
         st.subheader("Date Filters")
-        
+
         # Daily filter
         selected_date = st.date_input("Select a date", value=datetime.now().date())
         st.session_state.selected_date = selected_date
