@@ -1062,17 +1062,17 @@ def main():
         display_columns = [
             'alert_title',
             'sourceRef',
-            'alert_generated_time',
-            'alert_received_time',
-            'processing_start_time',
-            'alert_created_at',
-            'case_created_at', 
-            'case_closed_at',
-            'mttd_minutes',
-            'response_time_minutes',
-            'resolution_time_hours',
-            'assigned_to',
-            'operational_status'
+            'alert_generated_time',    # Temps initial de l'incident
+            'alert_received_time',     # Temps de détection par ELK
+            'processing_start_time',   # Début du traitement
+            'alert_created_at',        # Création dans TheHive
+            'case_created_at',         # Ouverture du case
+            'case_closed_at',         # Clôture du case
+            'mttd_minutes',           # Métrique MTTD
+            'response_time_minutes',  # Temps de réponse
+            'resolution_time_hours',  # Temps de résolution
+            'assigned_to',           # Assignation
+            'operational_status'     # État actuel
         ]
 
         available_columns = [col for col in display_columns if col in df.columns]
@@ -1080,60 +1080,60 @@ def main():
         # Configuration des colonnes avec descriptions
         column_config = {
             "alert_title": st.column_config.TextColumn(
-                "Alert Title",
-                help="Titre de l'alerte"
+                "Titre de l'alerte",
+                help="Le titre descriptif de l'alerte"
             ),
             "sourceRef": st.column_config.TextColumn(
-                "Source Ref",
-                help="Référence source de l'alerte"
+                "Référence",
+                help="Identifiant unique de référence de l'alerte"
             ),
             "alert_generated_time": st.column_config.TextColumn(
-                "Incident Time",
-                help="Le temps réel où l'incident s'est produit"
+                "Temps de l'incident",
+                help="Le temps réel où l'incident s'est produit dans le système source"
             ),
             "alert_received_time": st.column_config.TextColumn(
-                "Detection Time",
-                help="Le temps où l'incident est détecté par ELK"
+                "Temps de détection",
+                help="Le moment où l'incident est détecté par ELK"
             ),
             "processing_start_time": st.column_config.TextColumn(
-                "Processing Start",
-                help="Le temps de début de traitement de l'incident"
+                "Début traitement",
+                help="Le temps de début de traitement de l'incident par l'équipe"
             ),
             "alert_created_at": st.column_config.TextColumn(
-                "Alert Created",
-                help="Le temps de création de l'alerte dans TheHive et notification de l'équipe"
+                "Création alerte",
+                help="Le temps de création de l'alerte dans TheHive et notification de l'équipe Marjane"
             ),
             "case_created_at": st.column_config.TextColumn(
-                "Case Created",
-                help="La date d'ouverture du case"
+                "Ouverture case",
+                help="La date d'ouverture du dossier d'investigation (case)"
             ),
             "case_closed_at": st.column_config.TextColumn(
-                "Case Closed",
-                help="La date de clôture du case"
+                "Clôture case",
+                help="La date de clôture définitive du dossier"
             ),
             "mttd_minutes": st.column_config.NumberColumn(
                 "MTTD (min)",
-                help="Mean Time To Detect: Temps entre la génération et la détection de l'incident",
+                help="Mean Time To Detect: Temps entre la génération de l'incident et sa détection",
                 format="%.1f"
             ),
             "response_time_minutes": st.column_config.NumberColumn(
-                "Response Time (min)",
-                help="Temps entre la réception et le début du traitement",
+                "Temps réponse (min)",
+                help="Temps entre la détection et le début du traitement",
                 format="%.1f"
             ),
             "resolution_time_hours": st.column_config.NumberColumn(
-                "Resolution Time (h)",
-                help="Temps total entre la création et la clôture du case",
+                "Temps résolution (h)",
+                help="Temps total entre l'ouverture et la clôture du case",
                 format="%.1f"
             ),
             "assigned_to": st.column_config.TextColumn(
-                "Assigned To",
-                help="L'analyste assigné au case"
+                "Assigné à",
+                help="L'analyste responsable du traitement"
             ),
             "operational_status": st.column_config.SelectboxColumn(
-                "Status",
+                "Statut",
                 options=['Untreated', 'In Progress', 'Terminated'],
-                help="État opérationnel actuel de l'alerte"
+                help="État opérationnel actuel de l'alerte: Non traité, En cours, ou Terminé"
             )
         }
         def style_status(val):
