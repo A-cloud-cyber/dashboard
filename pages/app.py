@@ -267,6 +267,15 @@ def process_operational_data(alerts, cases):
         case_id = alert_info['case_id']
         if case_id and case_id in cases_dict:
             case = cases_dict[case_id]
+            
+            # Add resolutionStatus to alert_info
+            alert_info['resolutionStatus'] = case.get('resolutionStatus', '')
+            
+            # Update false_positive detection logic
+            alert_info['false_positive'] = False
+            if case.get('resolutionStatus', '').lower() == 'falsepositive':
+                alert_info['false_positive'] = True
+
             # Convert case timestamps - ensure all timestamps are tz-naive for consistent calculations
             if case.get('createdAt'):
                 ts = pd.to_datetime(case.get('createdAt'), unit='ms')
@@ -569,7 +578,7 @@ def create_modern_kpi_dashboard(df):
     # Average Resolution Time
 
     # Third row - SLA, FP and Alerts/day
-    col8, col9, col10, col11 = st.columns(4)
+    col8, col9, col10 = st.columns(3)
 
     # SLA compliance: percent of alerts with response_time_minutes <= 30 among those with a response_time
     if 'response_time_minutes' in df.columns and df['response_time_minutes'].notna().any():
@@ -597,33 +606,30 @@ def create_modern_kpi_dashboard(df):
         </div>
         """, unsafe_allow_html=True)
 
+    # Calcul amélioré des faux positifs
+    terminated_cases = df[df['operational_status'] == 'Terminated']
+    
+    # Safe check for resolutionStatus column
+    has_resolution_status = 'resolutionStatus' in terminated_cases.columns
+    
+    false_positive_cases = terminated_cases[
+        (terminated_cases['false_positive'] == True) | 
+        (has_resolution_status & (terminated_cases['resolutionStatus'].str.lower() == 'falsepositive'))
+    ]
+
+    if len(terminated_cases) > 0:
+        false_positive_pct = (len(false_positive_cases) / len(terminated_cases)) * 100
+    else:
+        false_positive_pct = 0
+
     with col10:
         fp_text = f"{false_positive_pct:.1f}%" if false_positive_pct is not None else "N/A"
+        details = f"({len(false_positive_cases)} sur {len(terminated_cases)} cas terminés)"
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #f0abfc 0%, #f97316 100%);">
             <div class="metric-value">{fp_text}</div>
             <div class="metric-label">% Faux Positifs</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Alerts per day: compute from alert_created_at range
-    try:
-        if 'alert_created_at' in df.columns and df['alert_created_at'].notna().any():
-            min_date = pd.to_datetime(df['alert_created_at']).min()
-            max_date = pd.to_datetime(df['alert_created_at']).max()
-            days = (max_date - min_date).days + 1
-            alerts_per_day = len(df) / days if days > 0 else len(df)
-        else:
-            alerts_per_day = None
-    except Exception:
-        alerts_per_day = None
-
-    with col11:
-        apd_text = f"{alerts_per_day:.1f}" if alerts_per_day is not None else "N/A"
-        st.markdown(f"""
-        <div class="metric-container" style="background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%);">
-            <div class="metric-value">{apd_text}</div>
-            <div class="metric-label">Avg Alerts / Day</div>
+            <div class="metric-label" style="font-size:0.8rem;">{details}</div>
         </div>
         """, unsafe_allow_html=True)
 
