@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import pandas as pd
@@ -223,6 +222,14 @@ def process_operational_data(alerts, cases):
         else:
             alert_info['processing_start_time'] = pd.NaT  # Default to NaT if not found
 
+        # Alert generated time (real incident time)
+        generated_time_data = custom_fields.get('alert-generated-time', {})
+        if generated_time_data and 'date' in generated_time_data:
+            ts = pd.to_datetime(generated_time_data['date'], unit='ms')
+            alert_info['alert_generated_time'] = ts + pd.Timedelta(hours=1)
+        else:
+            alert_info['alert_generated_time'] = pd.NaT
+
         # Response time calculation (existing): created_at - received_at
         if pd.notna(alert_info['alert_received_time']) and pd.notna(alert_info['alert_created_at']):
             try:
@@ -244,6 +251,17 @@ def process_operational_data(alerts, cases):
                 alert_info['takeover_time_minutes'] = None
         else:
             alert_info['takeover_time_minutes'] = None
+
+        # MTTD calculation (KPI 2): received_time - generated_time (minutes)
+        if pd.notna(alert_info['alert_generated_time']) and pd.notna(alert_info['alert_received_time']):
+            try:
+                alert_info['mttd_minutes'] = (
+                    alert_info['alert_received_time'] - alert_info['alert_generated_time']
+                ).total_seconds() / 60
+            except Exception:
+                alert_info['mttd_minutes'] = None
+        else:
+            alert_info['mttd_minutes'] = None
 
         # Associated case information
         case_id = alert_info['case_id']
@@ -368,6 +386,14 @@ def create_modern_kpi_dashboard(df):
         avg_takeover = df['takeover_time_minutes'].dropna().mean()
     else:
         avg_takeover = None
+
+    # Add MTTD calculation (KPI 2)
+    if 'mttd_minutes' in df.columns and df['mttd_minutes'].notna().any():
+        avg_mttd = df['mttd_minutes'].dropna().mean()
+        median_mttd = df['mttd_minutes'].dropna().median()
+    else:
+        avg_mttd = None
+        median_mttd = None
 
     # Avg MTTR (KPI 3)
     if 'mttr_hours' in df.columns and df['mttr_hours'].notna().any():
@@ -495,7 +521,7 @@ def create_modern_kpi_dashboard(df):
         """, unsafe_allow_html=True)
 
     # Second row - Performance metrics (reordered)
-    col5, col6, col7, col8 = st.columns(4)
+    col5, col6, col7, col8, col9 = st.columns(5)  # Ajout d'une colonne
 
     # KPI 3 - MTTR
 
@@ -509,6 +535,17 @@ def create_modern_kpi_dashboard(df):
         """, unsafe_allow_html=True)
 
     with col6:
+        mttd_text = f"{avg_mttd:.1f} min" if avg_mttd is not None else "N/A"
+        mttd_sub = f"(median: {median_mttd:.1f} min)" if median_mttd is not None else ""
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);">
+            <div class="metric-value">{mttd_text}</div>
+            <div class="metric-label">KPI 2 - Temps de Détection (MTTD)</div>
+            <div class="metric-label" style="font-size:0.8rem; opacity:0.85;">{mttd_sub}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col7:
         mttr_text = f"{avg_mttr_calc:.1f} h" if avg_mttr_calc is not None else "N/A"
         mttr_sub = f"(median: {median_mttr:.1f} h, n={mttr_count})" if median_mttr is not None else ""
         st.markdown(f"""
@@ -520,7 +557,7 @@ def create_modern_kpi_dashboard(df):
         """, unsafe_allow_html=True)
 
     # Avg Response (created - received)
-    with col7:
+    with col8:
         response_text = f"{avg_response:.1f} min" if avg_response is not None else "N/A"
         st.markdown(f"""
         <div class="metric-container" style="background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);">
@@ -899,7 +936,7 @@ def main():
     # Sidebar with user info and controls
     with st.sidebar:
         auth_info = st.session_state.auth_info
-        st.markdown(f"### 👋 **{auth_info.get('user_name', auth_info.get('username', 'User'))}**")
+        st.markdown(f"### 👋 *{auth_info.get('user_name', auth_info.get('username', 'User'))}*")
         st.markdown("---")
 
         st.header("Configuration")
@@ -968,10 +1005,10 @@ def main():
 
             df = process_operational_data(alerts, cases)
             st.session_state.df = df
-            st.success(f"✅ Loaded **{len(df):,} alerts**")
+            st.success(f"✅ Loaded *{len(df):,} alerts*")
     else:
         df = st.session_state.df
-        st.info(f"📊 Using cached data: **{len(df):,} alerts**")
+        st.info(f"📊 Using cached data: *{len(df):,} alerts*")
 
     # Filter data based on selected date and filter option
     if not df.empty:
@@ -1023,9 +1060,11 @@ def main():
     if not df.empty:
         # Colonnes à afficher (avec alert_received_time et case_created_at)
         display_columns = [
-            'alert_title', 'sourceRef', 'alert_created_at',
-            'alert_received_time', 'case_created_at', 'processing_start_time',  # Added here
-            'response_time_minutes', 'resolution_time_hours', 'assigned_to',
+            'alert_title', 'sourceRef', 'alert_generated_time',  # Added here
+            'alert_created_at', 'alert_received_time', 
+            'case_created_at', 'processing_start_time',
+            'mttd_minutes', 'response_time_minutes',  # Added MTTD here
+            'resolution_time_hours', 'assigned_to',
             'case_closed_at', 'operational_status'
         ]
 
