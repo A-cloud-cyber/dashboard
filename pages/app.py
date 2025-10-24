@@ -182,8 +182,16 @@ def get_cases(url, auth_credentials, verify_ssl):
 # Data Processing
 def process_operational_data(alerts, cases):
     """Process data for detailed operational tracking"""
+    def convert_severity_to_priority(severity):
+        severity_map = {
+            4: 'P1',  # Critique (4 -> P1)
+            3: 'P2',  # Haute (3 -> P2)
+            2: 'P3',  # Moyenne (2 -> P3)
+            1: 'P4'   # Basse (1 -> P4)
+        }
+        return severity_map.get(severity, 'N/A')
+    
     operational_data = []
-
     cases_dict = {case.get('_id'): case for case in cases}
 
     for alert in alerts:
@@ -192,10 +200,12 @@ def process_operational_data(alerts, cases):
             'alert_title': alert.get('title', 'Title not available'),
             'sourceRef': alert.get('sourceRef', 'N/A'),
             'alert_status': alert.get('status', 'New'),
-            'severity': alert.get('severity', 1),
+            'severity': convert_severity_to_priority(alert.get('severity', 1)),  # Conversion ici
             'type': alert.get('type', ''),
             'source': alert.get('source', 'Unknown'),
             'case_id': alert.get('case', ''),
+            # Correction de l'extraction du mode de détection
+            'mode_detection': alert.get('customFields', {}).get('mode-detection', {}).get('string', 'N/A')
         }
 
         # Alert creation date (convert from UTC to local time directly)
@@ -633,6 +643,55 @@ def create_modern_kpi_dashboard(df):
         </div>
         """, unsafe_allow_html=True)
 
+    # Calcul du taux interne vs externe
+    type_counts = df['type'].value_counts()
+    total_incidents = len(df)
+    internal_count = type_counts.get('internal', 0)
+    external_count = type_counts.get('external', 0)
+    
+    if total_incidents > 0:
+        internal_rate = (internal_count / total_incidents) * 100
+        external_rate = (external_count / total_incidents) * 100
+    else:
+        internal_rate = 0
+        external_rate = 0
+
+    # Calcul du taux automatique vs manuel
+    detection_counts = df['mode_detection'].value_counts()
+    auto_count = detection_counts.get('automatique', 0)
+    manual_count = detection_counts.get('manuel', 0)
+    total_detections = auto_count + manual_count
+    
+    if total_detections > 0:
+        auto_rate = (auto_count / total_detections) * 100
+        manual_rate = (manual_count / total_detections) * 100
+    else:
+        auto_rate = 0
+        manual_rate = 0
+
+    # Après vos colonnes existantes, ajoutez:
+    col11, col12 = st.columns(2)
+
+    # Taux interne vs externe
+    with col11:
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%);">
+            <div class="metric-value">{internal_rate:.1f}% / {external_rate:.1f}%</div>
+            <div class="metric-label">Taux Interne vs Externe</div>
+            <div class="metric-label" style="font-size:0.8rem;">({internal_count} int. / {external_count} ext.)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Taux automatique vs manuel
+    with col12:
+        st.markdown(f"""
+        <div class="metric-container" style="background: linear-gradient(135deg, #8b5cf6 0%, #d946ef 100%);">
+            <div class="metric-value">{auto_rate:.1f}% / {manual_rate:.1f}%</div>
+            <div class="metric-label">Taux Auto vs Manuel</div>
+            <div class="metric-label" style="font-size:0.8rem;">({auto_count} auto. / {manual_count} man.)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
 def create_advanced_status_chart(df):
     """Advanced status chart"""
     if df.empty:
@@ -914,6 +973,16 @@ def create_timeline_dashboard(df):
         st.subheader("Origin (internal vs external)")
         st.bar_chart(timeline_data['origin'].value_counts())
 
+def priority_to_numeric(priority):
+    """Convert priority string (P1-P4) to numeric value (4-1)"""
+    priority_map = {
+        'P1': 4,  # P1 (Critique) -> 4 
+        'P2': 3,  # P2 (Haute) -> 3
+        'P3': 2,  # P3 (Moyenne) -> 2
+        'P4': 1   # P4 (Basse) -> 1
+    }
+    return priority_map.get(priority, 0)  # Return 0 for invalid priorities
+
 def main():
     # Initialize session state
     if 'authenticated' not in st.session_state:
@@ -1068,6 +1137,9 @@ def main():
         display_columns = [
             'alert_title',
             'sourceRef',
+            'severity',           # Ajout de la sévérité
+            'type',              # Ajout du type
+            'mode_detection',    # Ajout du mode de détection
             'alert_generated_time',    # Temps initial de l'incident
             'alert_received_time',     # Temps de détection par ELK
             'processing_start_time',   # Début du traitement
@@ -1092,6 +1164,18 @@ def main():
             "sourceRef": st.column_config.TextColumn(
                 "Référence",
                 help="Identifiant unique de référence de l'alerte"
+            ),
+            "severity": st.column_config.TextColumn(
+                "Priorité",
+                help="Niveau de priorité de l'alerte (P1: Critique, P2: Haute, P3: Moyenne, P4: Basse)",
+            ),
+            "type": st.column_config.TextColumn(
+                "Type",
+                help="Type de l'alerte (ex: externe, interne)"
+            ),
+            "mode_detection": st.column_config.TextColumn(
+                "Mode Détection",
+                help="Mode de détection de l'alerte"
             ),
             "alert_generated_time": st.column_config.TextColumn(
                 "Temps de l'incident",
@@ -1233,13 +1317,22 @@ def main():
         with col_stat4:
             total_sources = df['source'].nunique()
             most_frequent_source = df['source'].value_counts().index[0] if not df['source'].empty else "N/A"
-            severity_avg = df['severity'].mean() if df['severity'].notna().any() else 0
+            
+            # Nouveau calcul de la moyenne de sévérité
+            if not df.empty and 'severity' in df.columns:
+                numeric_severities = df['severity'].apply(priority_to_numeric)
+                severity_avg = numeric_severities[numeric_severities > 0].mean() if len(numeric_severities[numeric_severities > 0]) > 0 else 0
+                # Convertir la moyenne numérique en format P
+                severity_display = f"P{5-round(severity_avg)}" if severity_avg > 0 else "N/A"
+            else:
+                severity_display = "N/A"
+                
             st.markdown(f"""
             <div class="kpi-card">
                 <h4 style="margin-top:0; color:#374151;">Sources & Severity</h4>
                 <p><strong>Unique Sources:</strong> {total_sources}</p>
                 <p><strong>Main Source:</strong> {most_frequent_source}</p>
-                <p><strong>Average Severity:</strong> {severity_avg:.1f}</p>
+                <p><strong>Average Severity:</strong> {severity_display}</p>
             </div>
             """, unsafe_allow_html=True)
 
