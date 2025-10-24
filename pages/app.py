@@ -190,7 +190,7 @@ def process_operational_data(alerts, cases):
             1: 'P4'   # Basse (1 -> P4)
         }
         return severity_map.get(severity, 'N/A')
-    
+
     operational_data = []
     cases_dict = {case.get('_id'): case for case in cases}
 
@@ -277,10 +277,10 @@ def process_operational_data(alerts, cases):
         case_id = alert_info['case_id']
         if case_id and case_id in cases_dict:
             case = cases_dict[case_id]
-            
+
             # Add resolutionStatus to alert_info
             alert_info['resolutionStatus'] = case.get('resolutionStatus', '')
-            
+
             # Update false_positive detection logic
             alert_info['false_positive'] = False
             if case.get('resolutionStatus', '').lower() == 'falsepositive':
@@ -618,12 +618,12 @@ def create_modern_kpi_dashboard(df):
 
     # Calcul amélioré des faux positifs
     terminated_cases = df[df['operational_status'] == 'Terminated']
-    
+
     # Safe check for resolutionStatus column
     has_resolution_status = 'resolutionStatus' in terminated_cases.columns
-    
+
     false_positive_cases = terminated_cases[
-        (terminated_cases['false_positive'] == True) | 
+        (terminated_cases['false_positive'] == True) |
         (has_resolution_status & (terminated_cases['resolutionStatus'].str.lower() == 'falsepositive'))
     ]
 
@@ -648,7 +648,7 @@ def create_modern_kpi_dashboard(df):
     total_incidents = len(df)
     internal_count = type_counts.get('internal', 0)
     external_count = type_counts.get('external', 0)
-    
+
     if total_incidents > 0:
         internal_rate = (internal_count / total_incidents) * 100
         external_rate = (external_count / total_incidents) * 100
@@ -658,10 +658,13 @@ def create_modern_kpi_dashboard(df):
 
     # Calcul du taux automatique vs manuel
     detection_counts = df['mode_detection'].value_counts()
-    auto_count = detection_counts.get('automatique', 0)
-    manual_count = detection_counts.get('manuel', 0)
+    # Modifier cette partie pour prendre en compte toutes les variations possibles
+    auto_count = sum(detection_counts.get(x, 0) for x in ['automatique', 'automatic', 'Automatique', 'Automatic'])
+    manual_count = sum(detection_counts.get(x, 0) for x in ['manuel', 'manual', 'Manuel', 'Manual'])
     total_detections = auto_count + manual_count
+
     
+
     if total_detections > 0:
         auto_rate = (auto_count / total_detections) * 100
         manual_rate = (manual_count / total_detections) * 100
@@ -691,6 +694,39 @@ def create_modern_kpi_dashboard(df):
             <div class="metric-label" style="font-size:0.8rem;">({auto_count} auto. / {manual_count} man.)</div>
         </div>
         """, unsafe_allow_html=True)
+
+    # Visualisation des distributions
+    col13, col14 = st.columns(2)
+
+    with col13:
+        # Graphique pour Interne vs Externe
+        fig_type = go.Figure(data=[go.Pie(
+            labels=['Interne', 'Externe'],
+            values=[internal_count, external_count],
+            hole=.5,
+            marker_colors=['#3b82f6', '#06b6d4']
+        )])
+        fig_type.update_layout(
+            title_text="Distribution Interne/Externe",
+            height=300,
+            showlegend=True
+        )
+        st.plotly_chart(fig_type, use_container_width=True)
+
+    with col14:
+        # Graphique pour Auto vs Manuel
+        fig_detection = go.Figure(data=[go.Pie(
+            labels=['Automatique', 'Manuel'],
+            values=[auto_count, manual_count],
+            hole=.5,
+            marker_colors=['#8b5cf6', '#d946ef']
+        )])
+        fig_detection.update_layout(
+            title_text="Distribution Auto/Manuel",
+            height=300,
+            showlegend=True
+        )
+        st.plotly_chart(fig_detection, use_container_width=True)
 
 def create_advanced_status_chart(df):
     """Advanced status chart"""
@@ -976,7 +1012,7 @@ def create_timeline_dashboard(df):
 def priority_to_numeric(priority):
     """Convert priority string (P1-P4) to numeric value (4-1)"""
     priority_map = {
-        'P1': 4,  # P1 (Critique) -> 4 
+        'P1': 4,  # P1 (Critique) -> 4
         'P2': 3,  # P2 (Haute) -> 3
         'P3': 2,  # P3 (Moyenne) -> 2
         'P4': 1   # P4 (Basse) -> 1
@@ -1317,7 +1353,7 @@ def main():
         with col_stat4:
             total_sources = df['source'].nunique()
             most_frequent_source = df['source'].value_counts().index[0] if not df['source'].empty else "N/A"
-            
+
             # Nouveau calcul de la moyenne de sévérité
             if not df.empty and 'severity' in df.columns:
                 numeric_severities = df['severity'].apply(priority_to_numeric)
@@ -1326,7 +1362,7 @@ def main():
                 severity_display = f"P{5-round(severity_avg)}" if severity_avg > 0 else "N/A"
             else:
                 severity_display = "N/A"
-                
+
             st.markdown(f"""
             <div class="kpi-card">
                 <h4 style="margin-top:0; color:#374151;">Sources & Severity</h4>
