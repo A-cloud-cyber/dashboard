@@ -205,7 +205,14 @@ def process_operational_data(alerts, cases):
             'source': alert.get('source', 'Unknown'),
             'case_id': alert.get('case', ''),
             # Correction de l'extraction du mode de détection
-            'mode_detection': alert.get('customFields', {}).get('mode-detection', {}).get('string', 'N/A')
+            'mode_detection': alert.get('customFields', {}).get('mode-detection', {}).get('string', 'N/A'),
+            'attack_category': (
+                alert.get('customFields', {}).get('attack_categories', {}).get('string', '') or
+                (alert.get('customFields', {}).get('attack_categories', {}).get('list', [''])[0] 
+                 if isinstance(alert.get('customFields', {}).get('attack_categories', {}).get('list'), list) else '') or
+                alert.get('customFields', {}).get('attack-categories', {}).get('string', '') or
+                'N/A'
+            ).strip(),
         }
 
         # Alert creation date (convert from UTC to local time directly)
@@ -382,7 +389,12 @@ def process_operational_data(alerts, cases):
 
         operational_data.append(alert_info)
 
-    return pd.DataFrame(operational_data)
+    df = pd.DataFrame(operational_data)
+
+    # Ajouter cette ligne après la création du DataFrame
+    df['attack_category'] = df['attack_category'].replace(['', None, 'null', 'NULL'], 'N/A')
+
+    return df
 
 
 # KPI and Visualizations
@@ -1019,6 +1031,72 @@ def priority_to_numeric(priority):
     }
     return priority_map.get(priority, 0)  # Return 0 for invalid priorities
 
+def analyze_risk_periods(df):
+    """Analyze risk periods based on alert patterns"""
+    if df.empty:
+        return None, None
+    
+    # Convert to datetime if not already
+    df['alert_created_at'] = pd.to_datetime(df['alert_created_at'])
+    
+    # Analyze by day of month
+    day_of_month_risk = df.groupby(df['alert_created_at'].dt.day).size()
+    end_of_month_alerts = day_of_month_risk[day_of_month_risk.index >= 25].sum() / len(df) * 100
+    
+    # Analyze by hour (business vs non-business hours)
+    hour_risk = df.groupby(df['alert_created_at'].dt.hour).size()
+    business_hours = range(8, 18)
+    non_business_hours = list(range(0, 8)) + list(range(18, 24))
+    
+    business_hours_alerts = sum(hour_risk.get(h, 0) for h in business_hours)
+    non_business_hours_alerts = sum(hour_risk.get(h, 0) for h in non_business_hours)
+    
+    # Analyze by day of week
+    weekday_risk = df.groupby(df['alert_created_at'].dt.weekday).size()
+    weekend_alerts = (weekday_risk.get(5, 0) + weekday_risk.get(6, 0)) / len(df) * 100
+    
+    risk_periods = {
+        'end_of_month_percentage': end_of_month_alerts,
+        'non_business_hours_percentage': (non_business_hours_alerts / len(df)) * 100,
+        'weekend_percentage': weekend_alerts,
+        'riskiest_hours': hour_risk.nlargest(3).index.tolist(),
+        'riskiest_days': weekday_risk.nlargest(3).index.tolist()
+    }
+    
+    # Get hourly patterns
+    hourly_pattern = hour_risk.to_dict()
+    
+    return risk_periods, hourly_pattern
+
+def create_attack_categories_analysis(df):
+    """Create analysis of attack categories"""
+    if 'attack_category' not in df.columns or df.empty:
+        return None
+        
+    # Calculate category percentages
+    category_counts = df['attack_category'].value_counts()
+    category_percentages = (category_counts / len(df) * 100).round(2)
+    
+    # Create visualization
+    fig = go.Figure(data=[
+        go.Bar(
+            x=category_percentages.values,
+            y=category_percentages.index,
+            orientation='h',
+            marker_color='#3b82f6'
+        )
+    ])
+    
+    fig.update_layout(
+        title="Distribution des Catégories d'Attaque",
+        xaxis_title="Pourcentage (%)",
+        yaxis_title="Catégorie",
+        height=800,
+        margin=dict(l=200)  # More space for category labels
+    )
+    
+    return fig, category_percentages
+
 def main():
     # Initialize session state
     if 'authenticated' not in st.session_state:
@@ -1173,20 +1251,21 @@ def main():
         display_columns = [
             'alert_title',
             'sourceRef',
-            'severity',           # Ajout de la sévérité
-            'type',              # Ajout du type
-            'mode_detection',    # Ajout du mode de détection
-            'alert_generated_time',    # Temps initial de l'incident
-            'alert_received_time',     # Temps de détection par ELK
-            'processing_start_time',   # Début du traitement
-            'alert_created_at',        # Création dans TheHive
-            'case_created_at',         # Ouverture du case
-            'case_closed_at',         # Clôture du case
-            'mttd_minutes',           # Métrique MTTD
-            'response_time_minutes',  # Temps de réponse
-            'resolution_time_hours',  # Temps de résolution
-            'assigned_to',           # Assignation
-            'operational_status'     # État actuel
+            'severity',
+            'type',
+            'attack_category',  # Assurez-vous que cette ligne est présente
+            'mode_detection',
+            'alert_generated_time',
+            'alert_received_time',
+            'processing_start_time',
+            'alert_created_at',
+            'case_created_at',
+            'case_closed_at',
+            'mttd_minutes',
+            'response_time_minutes',
+            'resolution_time_hours',
+            'assigned_to',
+            'operational_status'
         ]
 
         available_columns = [col for col in display_columns if col in df.columns]
@@ -1208,6 +1287,44 @@ def main():
             "type": st.column_config.TextColumn(
                 "Type",
                 help="Type de l'alerte (ex: externe, interne)"
+            ),
+            "attack_category": st.column_config.SelectboxColumn(
+                "Catégorie d'Attaque",
+                options=[
+                    "Phishing (email)",
+                    "Phishing (spear / targeted)",
+                    "Credential harvesting (form/keylogger)",
+                    "RDP brute force / credential stuffing",
+                    "SSH brute force",
+                    "Brute force générique (FTP, VPN, etc.)",
+                    "Brute force web (login page)",
+                    "Scanning / Reconnaissance (port scan, vulnscan)",
+                    "Exploitation de vulnérabilité (ex: CVE exploit)",
+                    "Web application attack (SQLi, XSS, LFI/RFI)",
+                    "Web shell / backdoor web",
+                    "Malware (generic)",
+                    "Ransomware",
+                    "Trojan / Remote Access Trojan (RAT)",
+                    "Downloader / dropper",
+                    "Cryptominer / cryptojacking",
+                    "Lateral movement (WMI, PsExec, RDP interne)",
+                    "Privilege escalation (local / AD)",
+                    "Persistence (scheduled tasks, services, registry autorun)",
+                    "Exfiltration de données (HTTP, DNS, SFTP, cloud)",
+                    "Command & Control (C2) / Beaconing",
+                    "DNS tunneling / covert channel",
+                    "Data destruction / sabotage",
+                    "Insider (malveillance interne / fuite intentionnelle)",
+                    "Supply chain compromise",
+                    "Misconfiguration (cloud / permissions / S3 exposé)",
+                    "API abuse / token compromise",
+                    "DDoS / volumetric attack",
+                    "IoT compromise / botnet device compromise",
+                    "Social engineering non-phishing (vishing, smishing)",
+                    "Physical compromise (usb drop, accès physique)",
+                    "N/A"
+                ],
+                help="Catégorie principale de l'attaque détectée"
             ),
             "mode_detection": st.column_config.TextColumn(
                 "Mode Détection",
@@ -1384,6 +1501,78 @@ def main():
             </ul>
         </div>
         """, unsafe_allow_html=True)
+
+    # Analyse des Catégories d'Attaque
+    st.markdown('<div class="section-header">Analyse des Catégories d\'Attaque</div>', unsafe_allow_html=True)
+
+    # Afficher l'analyse des catégories d'attaque
+    attack_fig, category_stats = create_attack_categories_analysis(df)
+    if attack_fig is not None:
+        st.plotly_chart(attack_fig, use_container_width=True)
+        
+        # Afficher les top 5 catégories
+        st.markdown("### Top 5 des Catégories d'Attaque")
+        top_5_categories = category_stats.head()
+        for cat, pct in top_5_categories.items():
+            st.markdown(f"- **{cat}**: {pct:.1f}%")
+
+    # Analyse des périodes à risque
+    st.markdown('<div class="section-header">Périodes à Risque</div>', unsafe_allow_html=True)
+
+    risk_periods, hourly_pattern = analyze_risk_periods(df)
+    if risk_periods:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            <div class="kpi-card">
+                <h4>Indicateurs de Risque</h4>
+                <ul>
+                    <li>Fin de mois: {:.1f}% des alertes</li>
+                    <li>Hors heures ouvrées: {:.1f}% des alertes</li>
+                    <li>Week-ends: {:.1f}% des alertes</li>
+                </ul>
+            </div>
+            """.format(
+                risk_periods['end_of_month_percentage'],
+                risk_periods['non_business_hours_percentage'],
+                risk_periods['weekend_percentage']
+            ), unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("""
+            <div class="kpi-card">
+                <h4>Périodes les Plus à Risque</h4>
+                <p><strong>Heures:</strong> {}</p>
+                <p><strong>Jours:</strong> {}</p>
+            </div>
+            """.format(
+                ", ".join(f"{h}h" for h in risk_periods['riskiest_hours']),
+                ", ".join(['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'][d] for d in risk_periods['riskiest_days'])
+            ), unsafe_allow_html=True)
+            
+        # Graphique de distribution horaire
+        fig = go.Figure()
+        hours = list(hourly_pattern.keys())
+        counts = list(hourly_pattern.values())
+        
+        fig.add_trace(go.Scatter(
+            x=hours,
+            y=counts,
+            mode='lines+markers',
+            name='Alertes par heure',
+            line=dict(color='#3b82f6', width=3),
+            marker=dict(size=8)
+        ))
+        
+        fig.update_layout(
+            title="Distribution Horaire des Alertes",
+            xaxis_title="Heure de la journée",
+            yaxis_title="Nombre d'alertes",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
     # Informative footer
     st.divider()
